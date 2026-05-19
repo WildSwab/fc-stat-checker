@@ -6,8 +6,9 @@ import javax.swing.border.EmptyBorder;
 import java.awt.*;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import net.runelite.api.Client;
 import net.runelite.api.FriendsChatManager;
 import net.runelite.api.FriendsChatMember;
@@ -38,7 +39,7 @@ public class FcStatCheckerPanel extends PluginPanel
     private final JPanel resultsPanel;
     private final JLabel statusLabel;
 
-    private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
     private final List<String> memberNames = new ArrayList<>();
 
     @Inject
@@ -159,118 +160,112 @@ public class FcStatCheckerPanel extends PluginPanel
         searchButton.setEnabled(false);
         statusLabel.setText("Checking 0 / " + memberNames.size() + "...");
 
-        executor.submit(() ->
+        scheduleNextLookup(0, selectedSkill, minLevel, new ArrayList<>(memberNames), new int[]{0}, new int[]{0});
+    }
+
+    private void scheduleNextLookup(int index, String selectedSkill, int minLevel,
+                                    List<String> names, int[] checked, int[] failed)
+    {
+        if (index >= names.size())
         {
-            int[] checked = {0};
-            int[] failed = {0};
-
-            for (String name : memberNames)
+            SwingUtilities.invokeLater(() ->
             {
-                String levelText;
-                Color rowColor;
+                String suffix = unrankedOnlyCheckbox.isSelected()
+                        ? failed[0] + " unranked member(s) found."
+                        : "Done! " + failed[0] + " / " + names.size() + " don't meet req.";
+                statusLabel.setText(suffix);
+                searchButton.setEnabled(true);
+            });
+            return;
+        }
 
-                try
+        String name = names.get(index);
+
+        executor.schedule(() ->
+        {
+            String levelText;
+            Color rowColor;
+            boolean addRow = true;
+
+            try
+            {
+                HiscoreResult result = hiscoreClient.lookup(name, HiscoreEndpoint.NORMAL);
+
+                if (result == null)
                 {
-                    HiscoreResult result = hiscoreClient.lookup(name, HiscoreEndpoint.NORMAL);
-
-                    if (result == null)
+                    if (unrankedOnlyCheckbox.isSelected())
                     {
-                        if (!unrankedOnlyCheckbox.isSelected())
+                        addRow = false;
+                    }
+                    levelText = "Not found";
+                    rowColor = Color.GRAY;
+                }
+                else
+                {
+                    HiscoreSkill hiscoreSkill = toHiscoreSkill(selectedSkill);
+                    int level = result.getSkill(hiscoreSkill).getLevel();
+                    boolean isUnranked = (level == -1);
+
+                    if (unrankedOnlyCheckbox.isSelected() && !isUnranked)
+                    {
+                        addRow = false;
+                        levelText = "";
+                        rowColor = Color.GRAY;
+                    }
+                    else if (isUnranked)
+                    {
+                        levelText = "Unranked";
+                        rowColor = new Color(200, 150, 50);
+                        failed[0]++;
+                    }
+                    else
+                    {
+                        boolean meetsReq = level >= minLevel;
+                        if (meetsReq)
                         {
-                            levelText = "Not found";
+                            addRow = false;
+                            levelText = "";
                             rowColor = Color.GRAY;
                         }
                         else
                         {
-                            checked[0]++;
-                            final int c = checked[0];
-                            SwingUtilities.invokeLater(() ->
-                                    statusLabel.setText("Checking " + c + " / " + memberNames.size() + "..."));
-                            try { Thread.sleep(600); } catch (InterruptedException ignored) {}
-                            continue;
-                        }
-                    }
-                    else
-                    {
-                        HiscoreSkill hiscoreSkill = toHiscoreSkill(selectedSkill);
-                        int level = result.getSkill(hiscoreSkill).getLevel();
-                        boolean isUnranked = (level == -1);
-
-                        if (unrankedOnlyCheckbox.isSelected() && !isUnranked)
-                        {
-                            checked[0]++;
-                            final int c = checked[0];
-                            SwingUtilities.invokeLater(() ->
-                                    statusLabel.setText("Checking " + c + " / " + memberNames.size() + "..."));
-                            try { Thread.sleep(600); } catch (InterruptedException ignored) {}
-                            continue;
-                        }
-
-                        if (isUnranked)
-                        {
-                            levelText = "Unranked";
-                            rowColor = new Color(200, 150, 50);
-                            failed[0]++;
-                        }
-                        else
-                        {
-                            boolean meetsReq = level >= minLevel;
-                            if (meetsReq)
-                            {
-                                checked[0]++;
-                                final int c = checked[0];
-                                SwingUtilities.invokeLater(() ->
-                                        statusLabel.setText("Checking " + c + " / " + memberNames.size() + "..."));
-                                try { Thread.sleep(600); } catch (InterruptedException ignored) {}
-                                continue;
-                            }
                             levelText = level + "";
                             rowColor = new Color(200, 50, 50);
                             failed[0]++;
                         }
                     }
                 }
-                catch (Exception e)
-                {
-                    if (!unrankedOnlyCheckbox.isSelected())
-                    {
-                        levelText = "Error";
-                        rowColor = Color.GRAY;
-                    }
-                    else
-                    {
-                        checked[0]++;
-                        try { Thread.sleep(600); } catch (InterruptedException ignored) {}
-                        continue;
-                    }
-                }
-
-                final String finalLevelText = levelText;
-                final Color finalColor = rowColor;
-                final String finalName = name;
-                checked[0]++;
-                final int currentChecked = checked[0];
-
-                SwingUtilities.invokeLater(() ->
-                {
-                    resultsPanel.add(createMemberRow(finalName, finalLevelText, finalColor));
-                    statusLabel.setText("Checking " + currentChecked + " / " + memberNames.size() + "...");
-                    revalidate();
-                    repaint();
-                });
-
-                try { Thread.sleep(600); } catch (InterruptedException ignored) {}
             }
+            catch (Exception e)
+            {
+                levelText = "Error";
+                rowColor = Color.GRAY;
+                if (unrankedOnlyCheckbox.isSelected())
+                {
+                    addRow = false;
+                }
+            }
+
+            checked[0]++;
+            final int currentChecked = checked[0];
+            final boolean shouldAddRow = addRow;
+            final String finalLevelText = levelText;
+            final Color finalColor = rowColor;
 
             SwingUtilities.invokeLater(() ->
             {
-                String suffix = unrankedOnlyCheckbox.isSelected()
-                        ? failed[0] + " unranked member(s) found."
-                        : "Done! " + failed[0] + " / " + memberNames.size() + " don't meet req.";
-                statusLabel.setText(suffix);
-                searchButton.setEnabled(true);
+                if (shouldAddRow)
+                {
+                    resultsPanel.add(createMemberRow(name, finalLevelText, finalColor));
+                }
+                statusLabel.setText("Checking " + currentChecked + " / " + names.size() + "...");
+                revalidate();
+                repaint();
             });
-        });
+
+            scheduleNextLookup(index + 1, selectedSkill, minLevel, names, checked, failed);
+
+        }, 600, TimeUnit.MILLISECONDS);
     }
 
     private JPanel createMemberRow(String name, String levelText, Color textColor)
@@ -304,7 +299,7 @@ public class FcStatCheckerPanel extends PluginPanel
             case "Hitpoints": return HiscoreSkill.HITPOINTS;
             case "Ranged": return HiscoreSkill.RANGED;
             case "Prayer": return HiscoreSkill.PRAYER;
-            case "Magic": return HiscoreSkill.MAGIC;
+            case "Magic": return HiscoreSkill.MAGIC;h
             case "Cooking": return HiscoreSkill.COOKING;
             case "Woodcutting": return HiscoreSkill.WOODCUTTING;
             case "Fletching": return HiscoreSkill.FLETCHING;
